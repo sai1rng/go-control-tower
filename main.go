@@ -18,8 +18,9 @@ import (
 
 // Configuration
 const (
-	AgentPort  = "5000"  // Port where go-windows-service-handler is listening on nodes
-	ServerPort = ":8000" // Port this Control Tower listens on
+	AgentPort  = "5000"         // Port where go-windows-service-handler is listening on nodes
+	ServerPort = ":8080"        // Port this Control Tower listens on
+	AWSRegion  = "eu-central-1" // Defined region
 )
 
 // Response structure
@@ -34,14 +35,14 @@ type APIResponse struct {
 	Success int          `json:"success_count,omitempty"`
 	Failed  int          `json:"failed_count,omitempty"`
 	Results []NodeResult `json:"results,omitempty"`
-	Message string       `json:"message,omitempty"` // Added this field
+	Message string       `json:"message,omitempty"`
 }
 
 var ec2Client *ec2.Client
 
 func main() {
-	// 1. Initialize AWS Session
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	// 1. Initialize AWS Session with explicit Region
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(AWSRegion))
 	if err != nil {
 		log.Fatalf("Unable to load SDK config: %v", err)
 	}
@@ -50,7 +51,7 @@ func main() {
 	// 2. Setup Router
 	http.HandleFunc("/control", handleControl)
 
-	fmt.Printf("Control Tower listening on %s\n", ServerPort)
+	fmt.Printf("Control Tower listening on %s (Region: %s)\n", ServerPort, AWSRegion)
 	if err := http.ListenAndServe(ServerPort, nil); err != nil {
 		log.Fatal(err)
 	}
@@ -76,14 +77,13 @@ func handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Find Target Nodes
-	log.Printf("Searching for nodes with %s=%s...", tagKey, tagVal)
+	log.Printf("Searching for nodes with %s=%s in %s...", tagKey, tagVal, AWSRegion)
 	ips, err := getInstances(tagKey, tagVal)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("AWS Error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Now this line will work correctly
 	if len(ips) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(APIResponse{Message: "No instances found matching tags."})
