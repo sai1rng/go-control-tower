@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 // Configuration
 const (
 	AgentPort  = "5000"         // Port where go-windows-service-handler is listening on nodes
-	ServerPort = ":8000"        // Port this Control Tower listens on
+	ServerPort = ":8080"        // Port this Control Tower listens on
 	AWSRegion  = "eu-central-1" // Defined region
 )
 
@@ -59,11 +60,14 @@ func main() {
 
 func handleControl(w http.ResponseWriter, r *http.Request) {
 	// Allow simple GET requests with query params
-	// Example: /control?key=Product&val=Payment&action=stop
+	// Example: /control?key=Product&val=Payment&action=stop&service-name=Spooler
 	query := r.URL.Query()
 	tagKey := query.Get("key")
 	tagVal := query.Get("val")
 	action := query.Get("action")
+
+	// CHANGED: Now looking for 'service-name' (kebab-case)
+	serviceName := query.Get("service-name")
 
 	if tagKey == "" || tagVal == "" || action == "" {
 		http.Error(w, "Missing required params: key, val, action", http.StatusBadRequest)
@@ -90,8 +94,8 @@ func handleControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Broadcast Command
-	results := broadcastCommand(ips, action)
+	// 2. Broadcast Command (Passing the serviceName)
+	results := broadcastCommand(ips, action, serviceName)
 
 	// 3. Summarize and Respond
 	successCount := 0
@@ -131,7 +135,7 @@ func getInstances(key, value string) ([]string, error) {
 		}
 		for _, res := range page.Reservations {
 			for _, inst := range res.Instances {
-				// Prefer Private IP if available (assuming Control Tower is in the same VPC)
+				// Prefer Private IP if available
 				if inst.PrivateIpAddress != nil {
 					ips = append(ips, *inst.PrivateIpAddress)
 				} else if inst.PublicIpAddress != nil {
@@ -145,9 +149,8 @@ func getInstances(key, value string) ([]string, error) {
 
 // --- Broadcast Logic ---
 
-func broadcastCommand(ips []string, action string) []NodeResult {
+func broadcastCommand(ips []string, action, serviceName string) []NodeResult {
 	var wg sync.WaitGroup
-	// Channel to safely collect results
 	resChan := make(chan NodeResult, len(ips))
 
 	for _, ip := range ips {
@@ -155,11 +158,23 @@ func broadcastCommand(ips []string, action string) []NodeResult {
 		go func(targetIP string) {
 			defer wg.Done()
 
-			// Construct URL: http://10.0.1.5:5000/stop
-			url := fmt.Sprintf("http://%s:%s/%s", targetIP, AgentPort, action)
+			// 1. Construct Base URL: http://10.0.1.5:5000/stop
+			baseStr := fmt.Sprintf("http://%s:%s/%s", targetIP, AgentPort, action)
 
+			// 2. Safely Append Query Params
+			u, _ := url.Parse(baseStr)
+			q := u.Query()
+
+			// CHANGED: Sending 'service-name' to the agent
+			if serviceName != "" {
+				q.Set("service-name", serviceName)
+			}
+			u.RawQuery = q.Encode()
+			finalURL := u.String()
+
+			// 3. Send Request
 			client := http.Client{Timeout: 3 * time.Second}
-			resp, err := client.Get(url)
+			resp, err := client.Get(finalURL)
 
 			res := NodeResult{IP: targetIP}
 
@@ -185,7 +200,6 @@ func broadcastCommand(ips []string, action string) []NodeResult {
 	wg.Wait()
 	close(resChan)
 
-	// Collect results from channel to slice
 	var results []NodeResult
 	for res := range resChan {
 		results = append(results, res)
