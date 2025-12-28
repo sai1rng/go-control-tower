@@ -19,7 +19,7 @@ import (
 // Configuration
 const (
 	AgentPort  = "5000"         // Port where go-windows-service-handler is listening on nodes
-	ServerPort = ":8080"        // Port this Control Tower listens on
+	ServerPort = ":8000"        // Port this Control Tower listens on
 	AWSRegion  = "eu-central-1" // Defined region
 )
 
