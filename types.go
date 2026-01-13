@@ -4,7 +4,7 @@ package main
 const (
 	WindowsAgentPort = "8080"
 	LinuxAgentPort   = "8080"
-	ServerPort       = ":8000"
+	ServerPort       = ":8080"
 	AWSRegion        = "eu-central-1"
 )
 
