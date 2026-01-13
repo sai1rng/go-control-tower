@@ -8,19 +8,18 @@ import (
 	"net/http"
 )
 
-// handleLinuxControl processes requests for Linux agents
 func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 1. Parse Params
 	query := r.URL.Query()
 	keys := query["key"]
 	vals := query["val"]
 	endpoint := query.Get("endpoint")
 
+	// Basic validation (Keys are still needed for targeting groups like "Role:Worker")
 	if len(keys) == 0 || len(keys) != len(vals) {
 		http.Error(w, "Invalid or missing key/val pairs", http.StatusBadRequest)
 		return
@@ -30,10 +29,9 @@ func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Map Endpoint
-	var agentMethod string
-	var agentPath string
-
+	// ... [Switch Statement for Endpoint Mapping is same as before] ...
+	// (Keeping the switch concise for this snippet)
+	var agentMethod, agentPath string
 	switch endpoint {
 	case "docker_list":
 		agentMethod = "GET"
@@ -58,7 +56,6 @@ func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Read Body & Find Nodes
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusInternalServerError)
@@ -66,24 +63,23 @@ func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	log.Printf("Targeting Linux nodes. Tags: %v=%v | Endpoint: %s", keys, vals, endpoint)
-	ips, err := getInstances(keys, vals)
+	// CALL WITH "linux" -> This enforces the OS check
+	log.Printf("Targeting Linux nodes. Tags: %v=%v", keys, vals)
+	ips, err := getInstances(keys, vals, "linux")
+
 	if err != nil {
 		http.Error(w, fmt.Sprintf("AWS Error: %v", err), http.StatusInternalServerError)
 		return
 	}
-
 	if len(ips) == 0 {
-		respondJSON(w, ips, []NodeResult{}) // Empty response
+		respondJSON(w, ips, []NodeResult{})
 		return
 	}
 
-	// 4. Broadcast
 	results := broadcastRequest(ips, LinuxAgentPort, agentMethod, agentPath, query, bodyBytes)
 	respondJSON(w, ips, results)
 }
 
-// handleWindowsControl processes requests for Windows agents
 func handleWindowsControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
@@ -107,23 +103,25 @@ func handleWindowsControl(w http.ResponseWriter, r *http.Request) {
 	case "service":
 		path = "/host/service"
 	default:
-		http.Error(w, "Invalid endpoint. Use 'inject' or 'service'", http.StatusBadRequest)
+		http.Error(w, "Invalid endpoint", http.StatusBadRequest)
 		return
 	}
 
 	bodyBytes, _ := io.ReadAll(r.Body)
-	ips, err := getInstances(keys, vals)
+
+	// CALL WITH "windows" -> This enforces the OS check
+	ips, err := getInstances(keys, vals, "windows")
+
 	if err != nil || len(ips) == 0 {
 		http.Error(w, "No nodes found or AWS error", http.StatusInternalServerError)
 		return
 	}
 
-	// Windows Agent is purely POST based
 	results := broadcastRequest(ips, WindowsAgentPort, "POST", path, nil, bodyBytes)
 	respondJSON(w, ips, results)
 }
 
-// Helper to formulate standard JSON response
+// ... respondJSON helper remains the same ...
 func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 	successCount := 0
 	for _, res := range results {
@@ -131,18 +129,12 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 			successCount++
 		}
 	}
-
 	msg := ""
 	if len(ips) == 0 {
-		msg = "No running instances found matching tags."
+		msg = "No matching instances found."
 	}
-
 	resp := APIResponse{
-		Total:        len(ips),
-		SuccessCount: successCount,
-		FailedCount:  len(ips) - successCount,
-		Results:      results,
-		Message:      msg,
+		Total: len(ips), SuccessCount: successCount, FailedCount: len(ips) - successCount, Results: results, Message: msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
