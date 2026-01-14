@@ -139,3 +139,9 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+// handleHealth provides a simple heartbeat
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Control Tower is running"))
+}

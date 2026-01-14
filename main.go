@@ -13,7 +13,8 @@ func main() {
 	// 2. Register Routes (handlers defined in handlers.go)
 	http.HandleFunc("/control/windows", handleWindowsControl)
 	http.HandleFunc("/control/linux", handleLinuxControl)
-
+	// NEW: Health Check
+	http.HandleFunc("/health", handleHealth)
 	fmt.Printf("Control Tower listening on %s (Region: %s)\n", ServerPort, AWSRegion)
 
 	// 3. Start Server
