@@ -9,6 +9,21 @@ import (
 )
 
 func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
+
+	// 1. Add CORS Headers
+	// Allowing "*" allows ANY website to hit your server.
+	// For better security, change "*" to "http://localhost:3001" if possible.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+
+	// 2. Handle Preflight (OPTIONS)
+	// The browser sends this first. We must return 200 OK immediately.
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
 		return
@@ -81,6 +96,21 @@ func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWindowsControl(w http.ResponseWriter, r *http.Request) {
+
+	// 1. Add CORS Headers
+	// Allowing "*" allows ANY website to hit your server.
+	// For better security, change "*" to "http://localhost:3001" if possible.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+
+	// 2. Handle Preflight (OPTIONS)
+	// The browser sends this first. We must return 200 OK immediately.
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
 		return
@@ -140,8 +170,14 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleHealth provides a simple heartbeat
+// handleHealth provides a simple heartbeat in JSON format
 func handleHealth(w http.ResponseWriter, r *http.Request) {
+	response := map[string]string{
+		"status":  "ok",
+		"message": "Control Tower is running",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Control Tower is running"))
+	json.NewEncoder(w).Encode(response)
 }
