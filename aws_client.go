@@ -13,7 +13,7 @@ import (
 
 var ec2Client *ec2.Client
 
-// InitAWS loads the AWS configuration and creates the EC2 client
+// InitAWS loads the AWS configuration
 func InitAWS() {
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(AWSRegion))
 	if err != nil {
@@ -26,11 +26,12 @@ func InitAWS() {
 func getInstances(keys []string, values []string, targetOS string) ([]string, error) {
 	var ips []string
 
-	// 1. AWS Filter: Get ONLY running instances matching user tags
+	// 1. Basic Filter: Running instances only
 	filters := []types.Filter{
 		{Name: aws.String("instance-state-name"), Values: []string{"running"}},
 	}
 
+	// 2. Add User Tags (if provided)
 	for i, k := range keys {
 		filters = append(filters, types.Filter{
 			Name:   aws.String("tag:" + k),
@@ -51,29 +52,19 @@ func getInstances(keys []string, values []string, targetOS string) ([]string, er
 
 		for _, res := range page.Reservations {
 			for _, inst := range res.Instances {
-
-				// --- 2. OS PLATFORM CHECK (FIXED) ---
-
-				// inst.Platform is of type 'types.PlatformValues' (string alias).
-				// It is NOT a pointer, so we compare it directly.
+				// --- Platform Check ---
 				// "windows" = Windows
-				// "" (Empty string) = Linux/Unix
+				// "" or "Linux/UNIX" = Linux
+				isWindows := strings.ToLower(string(inst.Platform)) == "windows"
 
-				isWindows := false
-				// Cast to string to compare safely
-				if strings.ToLower(string(inst.Platform)) == "windows" {
-					isWindows = true
-				}
-
-				// Filtering Logic
 				if targetOS == "windows" && !isWindows {
-					continue // Skip: User wants Windows, but Instance is Linux
+					continue
 				}
 				if targetOS == "linux" && isWindows {
-					continue // Skip: User wants Linux, but Instance is Windows
+					continue
 				}
 
-				// --- 3. Collect IP ---
+				// --- Collect IP ---
 				if inst.PrivateIpAddress != nil {
 					ips = append(ips, *inst.PrivateIpAddress)
 				} else if inst.PublicIpAddress != nil {

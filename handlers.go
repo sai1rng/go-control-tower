@@ -4,154 +4,117 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 )
 
-func handleLinuxControl(w http.ResponseWriter, r *http.Request) {
+// --- SSE Handlers (Fault Injection) ---
 
-	// 1. Add CORS Headers
-	// Allowing "*" allows ANY website to hit your server.
-	// For better security, change "*" to "http://localhost:3001" if possible.
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-
-	// 2. Handle Preflight (OPTIONS)
-	// The browser sends this first. We must return 200 OK immediately.
+// handleFaultSSE is a generic handler for SSE streams.
+// It is used by both /host/inject and /docker/fault.
+func handleFaultSSE(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
 	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// 1. Set SSE Headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Parse Query
+	query := r.URL.Query()
+	keys := query["key"]
+	vals := query["val"]
+
+	// Default to Linux if not specified (Faults are usually Linux-heavy in this context)
+	targetOS := "linux"
+	// If the path contains 'host/service' (Windows), we might need logic,
+	// but here we are strictly doing faults. You can add ?os=windows if needed.
+
+	ips, err := getInstances(keys, vals, targetOS)
+	if err != nil || len(ips) == 0 {
+		sendSSEMessage(w, flusher, "error", "No matching instances found")
+		return
+	}
+
+	// 3. Notify Start
+	sendSSEMessage(w, flusher, "start", fmt.Sprintf("Targeting %d nodes", len(ips)))
+
+	// 4. Stream Results
+	// r.URL.Path passes the exact path (e.g. /host/inject) to the agent
+	resultsChan := StreamBroadcast(ips, LinuxAgentPort, "GET", r.URL.Path, query, nil)
+
+	for res := range resultsChan {
+		jsonData, _ := json.Marshal(res)
+		fmt.Fprintf(w, "data: %s\n\n", jsonData)
+		flusher.Flush()
+	}
+
+	// 5. End
+	fmt.Fprintf(w, "event: end\ndata: \"done\"\n\n")
+	flusher.Flush()
+}
+
+// --- JSON Handlers (Management) ---
+
+// handleWindowsService handles POST /host/service (Start/Stop/Status)
+func handleWindowsService(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
+	if r.Method == "OPTIONS" {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
 		return
 	}
 
+	body, _ := io.ReadAll(r.Body)
+	handleJSONBroadcast(w, r, "windows", WindowsAgentPort, "POST", "/host/service", body)
+}
+
+// handleDockerJSON handles standard JSON requests for Docker (List, Start, Stop, Status)
+func handleDockerJSON(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	// Determine method and body based on the request to Control Tower
+	method := r.Method
+	var body []byte
+	if method == "POST" {
+		body, _ = io.ReadAll(r.Body)
+	}
+
+	// r.URL.Path is forwarded exactly (e.g. /docker/start)
+	handleJSONBroadcast(w, r, "linux", LinuxAgentPort, method, r.URL.Path, body)
+}
+
+// --- Helpers ---
+
+// handleJSONBroadcast encapsulates the common logic for finding nodes and waiting for JSON results
+func handleJSONBroadcast(w http.ResponseWriter, r *http.Request, osType, port, method, path string, body []byte) {
 	query := r.URL.Query()
 	keys := query["key"]
 	vals := query["val"]
-	endpoint := query.Get("endpoint")
 
-	// Basic validation (Keys are still needed for targeting groups like "Role:Worker")
-	if len(keys) == 0 || len(keys) != len(vals) {
-		http.Error(w, "Invalid or missing key/val pairs", http.StatusBadRequest)
-		return
-	}
-	if endpoint == "" {
-		http.Error(w, "Missing 'endpoint' param", http.StatusBadRequest)
-		return
-	}
-
-	// ... [Switch Statement for Endpoint Mapping is same as before] ...
-	// (Keeping the switch concise for this snippet)
-	var agentMethod, agentPath string
-	switch endpoint {
-	case "docker_list":
-		agentMethod = "GET"
-		agentPath = "/docker/list"
-	case "docker_status":
-		agentMethod = "POST"
-		agentPath = "/docker/status"
-	case "docker_start":
-		agentMethod = "POST"
-		agentPath = "/docker/start"
-	case "docker_stop":
-		agentMethod = "POST"
-		agentPath = "/docker/stop"
-	case "docker_fault":
-		agentMethod = "POST"
-		agentPath = "/docker/fault"
-	case "host_inject":
-		agentMethod = "POST"
-		agentPath = "/host/inject"
-	default:
-		http.Error(w, "Invalid endpoint", http.StatusBadRequest)
-		return
-	}
-
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-
-	// CALL WITH "linux" -> This enforces the OS check
-	log.Printf("Targeting Linux nodes. Tags: %v=%v", keys, vals)
-	ips, err := getInstances(keys, vals, "linux")
-
+	ips, err := getInstances(keys, vals, osType)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("AWS Error: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if len(ips) == 0 {
-		respondJSON(w, ips, []NodeResult{})
-		return
-	}
 
-	results := broadcastRequest(ips, LinuxAgentPort, agentMethod, agentPath, query, bodyBytes)
+	results := broadcastRequest(ips, port, method, path, query, body)
 	respondJSON(w, ips, results)
 }
 
-func handleWindowsControl(w http.ResponseWriter, r *http.Request) {
-
-	// 1. Add CORS Headers
-	// Allowing "*" allows ANY website to hit your server.
-	// For better security, change "*" to "http://localhost:3001" if possible.
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-
-	// 2. Handle Preflight (OPTIONS)
-	// The browser sends this first. We must return 200 OK immediately.
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
-		return
-	}
-
-	query := r.URL.Query()
-	keys := query["key"]
-	vals := query["val"]
-	endpoint := query.Get("endpoint")
-
-	if len(keys) == 0 || len(keys) != len(vals) {
-		http.Error(w, "Invalid key/val pairs", http.StatusBadRequest)
-		return
-	}
-
-	var path string
-	switch endpoint {
-	case "inject":
-		path = "/host/inject"
-	case "service":
-		path = "/host/service"
-	default:
-		http.Error(w, "Invalid endpoint", http.StatusBadRequest)
-		return
-	}
-
-	bodyBytes, _ := io.ReadAll(r.Body)
-
-	// CALL WITH "windows" -> This enforces the OS check
-	ips, err := getInstances(keys, vals, "windows")
-
-	if err != nil || len(ips) == 0 {
-		http.Error(w, "No nodes found or AWS error", http.StatusInternalServerError)
-		return
-	}
-
-	results := broadcastRequest(ips, WindowsAgentPort, "POST", path, nil, bodyBytes)
-	respondJSON(w, ips, results)
-}
-
-// ... respondJSON helper remains the same ...
 func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 	successCount := 0
 	for _, res := range results {
@@ -159,25 +122,38 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 			successCount++
 		}
 	}
+
 	msg := ""
 	if len(ips) == 0 {
-		msg = "No matching instances found."
+		msg = "No matching instances found. Did you provide ?key=...&val=... tags?"
 	}
+
 	resp := APIResponse{
-		Total: len(ips), SuccessCount: successCount, FailedCount: len(ips) - successCount, Results: results, Message: msg,
+		Total:        len(ips),
+		SuccessCount: successCount,
+		FailedCount:  len(ips) - successCount,
+		Results:      results,
+		Message:      msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleHealth provides a simple heartbeat in JSON format
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	response := map[string]string{
-		"status":  "ok",
-		"message": "Control Tower is running",
-	}
+func setupCORS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+}
 
+func sendSSEMessage(w http.ResponseWriter, f http.Flusher, event, data string) {
+	fmt.Fprintf(w, "event: %s\ndata: \"%s\"\n\n", event, data)
+	f.Flush()
+}
+
+// handleHealth is a simple local health check
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

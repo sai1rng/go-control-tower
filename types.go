@@ -16,7 +16,7 @@ type NodeResult struct {
 	Message    string `json:"message"`
 }
 
-// APIResponse is the aggregated response sent back to the user
+// APIResponse is the aggregated response sent back to the user (for JSON endpoints)
 type APIResponse struct {
 	Total        int          `json:"total_nodes"`
 	SuccessCount int          `json:"success_count"`
