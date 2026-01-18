@@ -7,20 +7,40 @@ import (
 	"net/http"
 )
 
+// --- CORS Helper ---
+
+// enableCORS sets standard CORS headers.
+// Returns true if the request was an OPTIONS preflight (and handled), false otherwise.
+func enableCORS(w http.ResponseWriter, r *http.Request) bool {
+	// Allow requests from ANY origin
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Allow common methods
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	// Allow common headers (Content-Type is crucial for JSON, Cache-Control for SSE)
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Cache-Control")
+
+	// Handle Preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return true
+	}
+	return false
+}
+
 // --- SSE Handlers (Fault Injection) ---
 
-// handleFaultSSE is a generic handler for SSE streams.
-// It is used by both /host/inject and /docker/fault.
 func handleFaultSSE(w http.ResponseWriter, r *http.Request) {
-	setupCORS(w, r)
-	if r.Method == "OPTIONS" {
+	// 1. Strict CORS Check
+	if enableCORS(w, r) {
 		return
 	}
 
-	// 1. Set SSE Headers
+	// 2. Set SSE Specific Headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Required for some proxies/browsers to not buffer SSE
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -28,15 +48,16 @@ func handleFaultSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Parse Query
 	query := r.URL.Query()
 	keys := query["key"]
 	vals := query["val"]
 
-	// Default to Linux if not specified (Faults are usually Linux-heavy in this context)
+	// Default to Linux if not specified
 	targetOS := "linux"
-	// If the path contains 'host/service' (Windows), we might need logic,
-	// but here we are strictly doing faults. You can add ?os=windows if needed.
+	// Optional: Check if user requested windows via query param
+	if query.Get("os") == "windows" {
+		targetOS = "windows"
+	}
 
 	ips, err := getInstances(keys, vals, targetOS)
 	if err != nil || len(ips) == 0 {
@@ -44,10 +65,10 @@ func handleFaultSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Notify Start
+	// Notify Start
 	sendSSEMessage(w, flusher, "start", fmt.Sprintf("Targeting %d nodes", len(ips)))
 
-	// 4. Stream Results
+	// Stream Results
 	// r.URL.Path passes the exact path (e.g. /host/inject) to the agent
 	resultsChan := StreamBroadcast(ips, LinuxAgentPort, "GET", r.URL.Path, query, nil)
 
@@ -57,19 +78,18 @@ func handleFaultSSE(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// 5. End
 	fmt.Fprintf(w, "event: end\ndata: \"done\"\n\n")
 	flusher.Flush()
 }
 
 // --- JSON Handlers (Management) ---
 
-// handleWindowsService handles POST /host/service (Start/Stop/Status)
+// handleWindowsService handles POST /host/service
 func handleWindowsService(w http.ResponseWriter, r *http.Request) {
-	setupCORS(w, r)
-	if r.Method == "OPTIONS" {
+	if enableCORS(w, r) {
 		return
 	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method must be POST", http.StatusMethodNotAllowed)
 		return
@@ -79,27 +99,27 @@ func handleWindowsService(w http.ResponseWriter, r *http.Request) {
 	handleJSONBroadcast(w, r, "windows", WindowsAgentPort, "POST", "/host/service", body)
 }
 
-// handleDockerJSON handles standard JSON requests for Docker (List, Start, Stop, Status)
+// handleDockerJSON handles Docker List/Start/Stop/Status
 func handleDockerJSON(w http.ResponseWriter, r *http.Request) {
-	setupCORS(w, r)
-	if r.Method == "OPTIONS" {
+	if enableCORS(w, r) {
 		return
 	}
 
-	// Determine method and body based on the request to Control Tower
+	// Determine method based on the request coming IN to Control Tower
 	method := r.Method
 	var body []byte
-	if method == "POST" {
+
+	// Read body only if it's a POST/PUT
+	if method == "POST" || method == "PUT" {
 		body, _ = io.ReadAll(r.Body)
 	}
 
-	// r.URL.Path is forwarded exactly (e.g. /docker/start)
+	// Forward the exact path (/docker/list, /docker/start, etc.)
 	handleJSONBroadcast(w, r, "linux", LinuxAgentPort, method, r.URL.Path, body)
 }
 
 // --- Helpers ---
 
-// handleJSONBroadcast encapsulates the common logic for finding nodes and waiting for JSON results
 func handleJSONBroadcast(w http.ResponseWriter, r *http.Request, osType, port, method, path string, body []byte) {
 	query := r.URL.Query()
 	keys := query["key"]
@@ -125,7 +145,7 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 
 	msg := ""
 	if len(ips) == 0 {
-		msg = "No matching instances found. Did you provide ?key=...&val=... tags?"
+		msg = "No matching instances found."
 	}
 
 	resp := APIResponse{
@@ -135,24 +155,22 @@ func respondJSON(w http.ResponseWriter, ips []string, results []NodeResult) {
 		Results:      results,
 		Message:      msg,
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-func setupCORS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-}
-
 func sendSSEMessage(w http.ResponseWriter, f http.Flusher, event, data string) {
+	// Note: We do NOT need to set CORS headers here because
+	// handleFaultSSE already called enableCORS() at the top.
 	fmt.Fprintf(w, "event: %s\ndata: \"%s\"\n\n", event, data)
 	f.Flush()
 }
 
-// handleHealth is a simple local health check
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	setupCORS(w, r)
+	if enableCORS(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

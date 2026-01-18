@@ -10,13 +10,12 @@ import (
 	"time"
 )
 
-// StreamBroadcast sends requests concurrently and pushes results to a channel (For SSE).
-// Returns a read-only channel that closes when all requests are done.
+// StreamBroadcast sends requests concurrently and pushes results to a channel
 func StreamBroadcast(ips []string, port, method, path string, originalParams url.Values, body []byte) <-chan NodeResult {
 	resChan := make(chan NodeResult, len(ips))
 	var wg sync.WaitGroup
 
-	// Timeout covers long running faults (e.g. 60s CPU stress)
+	// Timeout set to 70s to accommodate long-running faults
 	client := http.Client{Timeout: 70 * time.Second}
 
 	go func() {
@@ -25,7 +24,7 @@ func StreamBroadcast(ips []string, port, method, path string, originalParams url
 			go func(targetIP string) {
 				defer wg.Done()
 
-				// Build URL
+				// Build URL: http://<IP>:8080<path>
 				reqURL := fmt.Sprintf("http://%s:%s%s", targetIP, port, path)
 
 				// Forward allowed query parameters
@@ -33,8 +32,8 @@ func StreamBroadcast(ips []string, port, method, path string, originalParams url
 					u, _ := url.Parse(reqURL)
 					q := u.Query()
 					for k, v := range originalParams {
-						// Filter out routing keys used by Control Tower
-						if k != "key" && k != "val" {
+						// Filter out internal routing keys
+						if k != "key" && k != "val" && k != "os" {
 							q.Set(k, v[0])
 						}
 					}
@@ -56,6 +55,7 @@ func StreamBroadcast(ips []string, port, method, path string, originalParams url
 					return
 				}
 
+				// Execute Request
 				resp, err := client.Do(req)
 				if err != nil {
 					resChan <- NodeResult{IP: targetIP, Status: "NetworkErr", Message: err.Error()}
@@ -84,8 +84,6 @@ func StreamBroadcast(ips []string, port, method, path string, originalParams url
 	return resChan
 }
 
-// broadcastRequest is a wrapper around StreamBroadcast for standard JSON responses.
-// It waits for all results and returns a slice.
 func broadcastRequest(ips []string, port, method, path string, originalParams url.Values, body []byte) []NodeResult {
 	stream := StreamBroadcast(ips, port, method, path, originalParams, body)
 	var results []NodeResult
